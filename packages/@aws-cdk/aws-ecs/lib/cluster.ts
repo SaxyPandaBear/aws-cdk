@@ -126,14 +126,9 @@ export class Cluster extends Resource implements ICluster {
   public readonly clusterName: string;
 
   /**
-   * The cluster-level (FARGATE, FARGATE_SPOT) capacity providers.
+   * The names of both ASG and Fargate capacity providers associated with the cluster.
    */
-  private _fargateCapacityProviders: string[] = [];
-
-  /**
-   * The EC2 Auto Scaling Group capacity providers associated with the cluster.
-   */
-  private _asgCapacityProviders: AsgCapacityProvider[] = [];
+  private _capacityProviderNames: string[] = [];
 
   /**
    * The AWS Cloud Map namespace to associate with the cluster.
@@ -173,7 +168,7 @@ export class Cluster extends Resource implements ICluster {
       clusterSettings = [{ name: 'containerInsights', value: props.containerInsights ? ContainerInsights.ENABLED : ContainerInsights.DISABLED }];
     }
 
-    this._fargateCapacityProviders = props.capacityProviders ?? [];
+    this._capacityProviderNames = props.capacityProviders ?? [];
     if (props.enableFargateCapacityProviders) {
       this.enableFargateCapacityProviders();
     }
@@ -189,7 +184,6 @@ export class Cluster extends Resource implements ICluster {
     const cluster = new CfnCluster(this, 'Resource', {
       clusterName: this.physicalName,
       clusterSettings,
-      capacityProviders: Lazy.list({ produce: () => this._fargateCapacityProviders }, { omitEmpty: true }),
       configuration: this._executeCommandConfiguration && this.renderExecuteCommandConfiguration(),
     });
 
@@ -216,7 +210,7 @@ export class Cluster extends Resource implements ICluster {
     // since it's harmless, but we'd prefer not to add unexpected new
     // resources to the stack which could surprise users working with
     // brown-field CDK apps and stacks.
-    Aspects.of(this).add(new MaybeCreateCapacityProviderAssociations(this, id, this._asgCapacityProviders));
+    Aspects.of(this).add(new MaybeCreateCapacityProviderAssociations(this, id, this._capacityProviderNames));
   }
 
   /**
@@ -224,8 +218,8 @@ export class Cluster extends Resource implements ICluster {
    */
   public enableFargateCapacityProviders() {
     for (const provider of ['FARGATE', 'FARGATE_SPOT']) {
-      if (!this._fargateCapacityProviders.includes(provider)) {
-        this._fargateCapacityProviders.push(provider);
+      if (!this._capacityProviderNames.includes(provider)) {
+        this._capacityProviderNames.push(provider);
       }
     }
   }
@@ -300,12 +294,13 @@ export class Cluster extends Resource implements ICluster {
    * @deprecated Use {@link Cluster.addAsgCapacityProvider} instead.
    */
   public addCapacity(id: string, options: AddCapacityOptions): autoscaling.AutoScalingGroup {
-    if (options.machineImage && options.machineImageType) {
-      throw new Error('You can only specify either machineImage or machineImageType, not both.');
-    }
+    // Do 2-way defaulting here: if the machineImageType is BOTTLEROCKET, pick the right AMI.
+    // Otherwise, determine the machineImageType from the given AMI.
+    const machineImage = options.machineImage ??
+      (options.machineImageType === MachineImageType.BOTTLEROCKET ? new BottleRocketImage() : new EcsOptimizedAmi());
 
-    const machineImage = options.machineImage ?? options.machineImageType === MachineImageType.BOTTLEROCKET ?
-      new BottleRocketImage() : new EcsOptimizedAmi();
+    const machineImageType = options.machineImageType ??
+      (isBottleRocketImage(machineImage) ? MachineImageType.BOTTLEROCKET : MachineImageType.AMAZON_LINUX_2);
 
     const autoScalingGroup = new autoscaling.AutoScalingGroup(this, id, {
       vpc: this.vpc,
@@ -315,7 +310,7 @@ export class Cluster extends Resource implements ICluster {
     });
 
     this.addAutoScalingGroup(autoScalingGroup, {
-      machineImageType: options.machineImageType,
+      machineImageType: machineImageType,
       ...options,
     });
 
@@ -329,7 +324,7 @@ export class Cluster extends Resource implements ICluster {
    */
   public addAsgCapacityProvider(provider: AsgCapacityProvider, options: AddAutoScalingGroupCapacityOptions = {}) {
     // Don't add the same capacity provider more than once.
-    if (this._asgCapacityProviders.includes(provider)) {
+    if (this._capacityProviderNames.includes(provider.capacityProviderName)) {
       return;
     }
 
@@ -340,7 +335,7 @@ export class Cluster extends Resource implements ICluster {
       taskDrainTime: provider.enableManagedTerminationProtection ? Duration.seconds(0) : options.taskDrainTime,
     });
 
-    this._asgCapacityProviders.push(provider);
+    this._capacityProviderNames.push(provider.capacityProviderName);
   }
 
   /**
@@ -462,8 +457,8 @@ export class Cluster extends Resource implements ICluster {
       throw new Error('CapacityProvider not supported');
     }
 
-    if (!this._fargateCapacityProviders.includes(provider)) {
-      this._fargateCapacityProviders.push(provider);
+    if (!this._capacityProviderNames.includes(provider)) {
+      this._capacityProviderNames.push(provider);
     }
   }
 
@@ -1022,11 +1017,18 @@ export interface AddAutoScalingGroupCapacityOptions {
    */
   readonly topicEncryptionKey?: kms.IKey;
 
-
   /**
-   * Specify the machine image type.
+   * What type of machine image this is
    *
-   * @default MachineImageType.AMAZON_LINUX_2
+   * Depending on the setting, different UserData will automatically be added
+   * to the `AutoScalingGroup` to configure it properly for use with ECS.
+   *
+   * If you create an `AutoScalingGroup` yourself and are adding it via
+   * `addAutoScalingGroup()`, you must specify this value. If you are adding an
+   * `autoScalingGroup` via `addCapacity`, this value will be determined
+   * from the `machineImage` you pass.
+   *
+   * @default - Automatically determined from `machineImage`, if available, otherwise `MachineImageType.AMAZON_LINUX_2`.
    */
   readonly machineImageType?: MachineImageType;
 }
@@ -1340,23 +1342,30 @@ export class AsgCapacityProvider extends CoreConstruct {
 class MaybeCreateCapacityProviderAssociations implements IAspect {
   private scope: CoreConstruct;
   private id: string;
-  private capacityProviders: AsgCapacityProvider[]
+  private capacityProviders: string[]
+  private resource?: CfnClusterCapacityProviderAssociations
 
-  constructor(scope: CoreConstruct, id: string, capacityProviders: AsgCapacityProvider[]) {
+  constructor(scope: CoreConstruct, id: string, capacityProviders: string[] ) {
     this.scope = scope;
     this.id = id;
     this.capacityProviders = capacityProviders;
   }
+
   public visit(node: IConstruct): void {
     if (node instanceof Cluster) {
-      const providers = this.capacityProviders.map(p => p.capacityProviderName).filter(p => p !== 'FARGATE' && p !== 'FARGATE_SPOT');
-      if (providers.length > 0) {
-        new CfnClusterCapacityProviderAssociations(this.scope, this.id, {
+      if (this.capacityProviders.length > 0 && !this.resource) {
+        const resource = new CfnClusterCapacityProviderAssociations(this.scope, this.id, {
           cluster: node.clusterName,
           defaultCapacityProviderStrategy: [],
-          capacityProviders: Lazy.list({ produce: () => providers }),
+          capacityProviders: Lazy.list({ produce: () => this.capacityProviders }),
         });
+        this.resource = resource;
       }
     }
   }
+}
+
+
+function isBottleRocketImage(image: ec2.IMachineImage) {
+  return image instanceof BottleRocketImage;
 }

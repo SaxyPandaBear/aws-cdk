@@ -76,7 +76,7 @@ nodeunitShim({
     test.deepEqual(assertions.length, 1);
     test.deepEqual(assertions[0].Assert, {
       'Fn::Not': [
-        { 'Fn::Contains': [['1', '2', '3'], { Ref: 'BootstrapVersion' }] },
+        { 'Fn::Contains': [['1', '2', '3', '4', '5'], { Ref: 'BootstrapVersion' }] },
       ],
     });
 
@@ -97,6 +97,33 @@ nodeunitShim({
     // THEN
     const template = app.synth().getStackByName('Stack2').template;
     test.equal(template?.Rules?.CheckBootstrapVersion, undefined);
+
+    test.done();
+  },
+
+  'customize version parameter'(test: Test) {
+    // GIVEN
+    const myapp = new App();
+
+    // WHEN
+    const mystack = new Stack(myapp, 'mystack', {
+      synthesizer: new DefaultStackSynthesizer({
+        bootstrapStackVersionSsmParameter: 'stack-version-parameter',
+      }),
+    });
+
+    mystack.synthesizer.addFileAsset({
+      fileName: __filename,
+      packaging: FileAssetPackaging.FILE,
+      sourceHash: 'file-asset-hash',
+    });
+
+    // THEN
+    const asm = myapp.synth();
+    const manifestArtifact = getAssetManifest(asm);
+
+    // THEN - the asset manifest has an SSM parameter entry
+    expect(manifestArtifact.bootstrapStackVersionSsmParameter).toEqual('stack-version-parameter');
 
     test.done();
   },
@@ -246,6 +273,25 @@ nodeunitShim({
     test.done();
   },
 
+  'customize deploy role externalId'(test: Test) {
+    // GIVEN
+    const myapp = new App();
+
+    // WHEN
+    const mystack = new Stack(myapp, 'mystack', {
+      synthesizer: new DefaultStackSynthesizer({
+        deployRoleExternalId: 'deploy-external-id',
+      }),
+    });
+
+    // THEN
+    const asm = myapp.synth();
+
+    const stackArtifact = asm.getStack(mystack.stackName);
+    expect(stackArtifact.assumeRoleExternalId).toEqual('deploy-external-id');
+
+    test.done();
+  },
 
   'synthesis with bucketPrefix'(test: Test) {
     // GIVEN

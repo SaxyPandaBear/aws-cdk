@@ -1589,7 +1589,7 @@ nodeunitShim({
     test.done();
   },
 
-  'cluster capacity with bottlerocket AMI'(test: Test) {
+  'cluster capacity with bottlerocket AMI, by setting machineImageType'(test: Test) {
     // GIVEN
     const app = new cdk.App();
     const stack = new cdk.Stack(app, 'test');
@@ -1682,20 +1682,34 @@ nodeunitShim({
     test.done();
   },
 
-  'throws when machineImage and machineImageType both specified'(test: Test) {
+  'cluster capacity with bottlerocket AMI, by setting the machineImage'(test: Test) {
     // GIVEN
     const app = new cdk.App();
     const stack = new cdk.Stack(app, 'test');
+
     const cluster = new ecs.Cluster(stack, 'EcsCluster');
+    cluster.addCapacity('bottlerocket-asg', {
+      instanceType: new ec2.InstanceType('c5.large'),
+      machineImage: new ecs.BottleRocketImage(),
+    });
 
     // THEN
-    test.throws(() => {
-      cluster.addCapacity('bottlerocket-asg', {
-        instanceType: new ec2.InstanceType('c5.large'),
-        machineImageType: ecs.MachineImageType.BOTTLEROCKET,
-        machineImage: new ecs.EcsOptimizedAmi(),
-      });
-    }, /You can only specify either machineImage or machineImageType, not both./);
+    expect(stack).to(haveResourceLike('AWS::AutoScaling::LaunchConfiguration', {
+      UserData: {
+        'Fn::Base64': {
+          'Fn::Join': [
+            '',
+            [
+              '\n[settings.ecs]\ncluster = "',
+              {
+                Ref: 'EcsCluster97242B84',
+              },
+              '"',
+            ],
+          ],
+        },
+      },
+    }));
     test.done();
   },
 
@@ -1709,6 +1723,10 @@ nodeunitShim({
 
     // THEN
     expect(stack).to(haveResource('AWS::ECS::Cluster', {
+      CapacityProviders: ABSENT,
+    }));
+
+    expect(stack).to(haveResource('AWS::ECS::ClusterCapacityProviderAssociations', {
       CapacityProviders: ['FARGATE_SPOT'],
     }));
 
@@ -1727,6 +1745,10 @@ nodeunitShim({
 
     // THEN
     expect(stack).to(haveResource('AWS::ECS::Cluster', {
+      CapacityProviders: ABSENT,
+    }));
+
+    expect(stack).to(haveResource('AWS::ECS::ClusterCapacityProviderAssociations', {
       CapacityProviders: ['FARGATE', 'FARGATE_SPOT'],
     }));
 
@@ -1744,6 +1766,10 @@ nodeunitShim({
 
     // THEN
     expect(stack).to(haveResource('AWS::ECS::Cluster', {
+      CapacityProviders: ABSENT,
+    }));
+
+    expect(stack).to(haveResource('AWS::ECS::ClusterCapacityProviderAssociations', {
       CapacityProviders: ['FARGATE', 'FARGATE_SPOT'],
     }));
 
@@ -1762,6 +1788,10 @@ nodeunitShim({
 
     // THEN
     expect(stack).to(haveResource('AWS::ECS::Cluster', {
+      CapacityProviders: ABSENT,
+    }));
+
+    expect(stack).to(haveResource('AWS::ECS::ClusterCapacityProviderAssociations', {
       CapacityProviders: ['FARGATE'],
     }));
 
@@ -1780,6 +1810,10 @@ nodeunitShim({
 
     // THEN
     expect(stack).to(haveResource('AWS::ECS::Cluster', {
+      CapacityProviders: ABSENT,
+    }));
+
+    expect(stack).to(haveResource('AWS::ECS::ClusterCapacityProviderAssociations', {
       CapacityProviders: ['FARGATE'],
     }));
 
@@ -1928,7 +1962,6 @@ nodeunitShim({
       enableManagedTerminationProtection: false,
     });
 
-    // These should not be added at the association level
     cluster.enableFargateCapacityProviders();
 
     // Ensure not added twice
@@ -1941,6 +1974,8 @@ nodeunitShim({
         Ref: 'EcsCluster97242B84',
       },
       CapacityProviders: [
+        'FARGATE',
+        'FARGATE_SPOT',
         {
           Ref: 'providerD3FF4D3A',
         },

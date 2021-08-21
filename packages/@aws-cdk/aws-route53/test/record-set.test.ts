@@ -1,6 +1,6 @@
-import { expect, haveResource } from '@aws-cdk/assert-internal';
+import { expect, haveResource, ResourcePart } from '@aws-cdk/assert-internal';
 import * as iam from '@aws-cdk/aws-iam';
-import { Duration, Stack } from '@aws-cdk/core';
+import { Duration, RemovalPolicy, Stack } from '@aws-cdk/core';
 import { nodeunitShim, Test } from 'nodeunit-shim';
 import * as route53 from '../lib';
 
@@ -540,6 +540,36 @@ nodeunitShim({
     test.done();
   },
 
+  'DS record'(test: Test) {
+    // GIVEN
+    const stack = new Stack();
+
+    const zone = new route53.HostedZone(stack, 'HostedZone', {
+      zoneName: 'myzone',
+    });
+
+    // WHEN
+    new route53.DsRecord(stack, 'DS', {
+      zone,
+      recordName: 'www',
+      values: ['12345 3 1 123456789abcdef67890123456789abcdef67890'],
+    });
+
+    // THEN
+    expect(stack).to(haveResource('AWS::Route53::RecordSet', {
+      Name: 'www.myzone.',
+      Type: 'DS',
+      HostedZoneId: {
+        Ref: 'HostedZoneDB99F866',
+      },
+      ResourceRecords: [
+        '12345 3 1 123456789abcdef67890123456789abcdef67890',
+      ],
+      TTL: '1800',
+    }));
+    test.done();
+  },
+
   'Zone delegation record'(test: Test) {
     // GIVEN
     const stack = new Stack();
@@ -587,6 +617,7 @@ nodeunitShim({
       parentHostedZoneId: parentZone.hostedZoneId,
       delegationRole: parentZone.crossAccountZoneDelegationRole!,
       ttl: Duration.seconds(60),
+      removalPolicy: RemovalPolicy.RETAIN,
     });
 
     // THEN
@@ -615,6 +646,10 @@ nodeunitShim({
       },
       TTL: 60,
     }));
+    expect(stack).to(haveResource('Custom::CrossAccountZoneDelegation', {
+      DeletionPolicy: 'Retain',
+      UpdateReplacePolicy: 'Retain',
+    }, ResourcePart.CompleteDefinition));
     test.done();
   },
 
